@@ -1,64 +1,91 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
-from .utils.config_manager import load_config
-from .utils.message_adapter import MessageAdapter
-from .utils.parser import get_url
-from pathlib import Path
-import random
+import aiohttp
+import asyncio
+import re
+import json
+from datetime import datetime
 
+class DouyinParser:
+    semaphore = asyncio.Semaphore(10)  # 类变量，所有实例共享
 
-@register("astrbot_plugin_showme_xjj", "drdon1234", "随机小姐姐美图短视频", "1.1")
-class randomXJJPlugin(Star):
-    def __init__(self, context: Context):
-        super().__init__(context)
-        self.config = load_config(Path(__file__).parent / "config.yaml")
-        self.uploader = MessageAdapter(self.config)
+    def __init__(self, session):
+        self.session = session
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 8.0.0; SM-G955U Build/R16NW) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+            'Referer': 'https://www.douyin.com/?is_from_mobile_home=1&recommend=1'
+        }
 
-    async def get_random_media(self, event: AstrMessageEvent, media_type):
-        cache_folder = Path(self.config['download']['cache_folder'])
-        cache_folder.mkdir(exist_ok=True, parents=True)
-        if media_type == "video":
-            text = "视频"
-            ext = "mp4"
-            api_list = self.config["api"]["video_api"]
-        elif media_type == "image":
-            text = "图片"
-            ext = "jpg"
-            api_list = self.config["api"]["picture_api"]
-        else:
-            raise ValueError(f"不支持的媒体类型: {media_type}")
-    
-        api_config = random.choice(api_list)
-        result = await get_url(api_config, cache_folder)
+    async def get_redirected_url(self, url):
+        async with self.session.head(url, allow_redirects=True) as response:
+            return str(response.url)
+
+    async def fetch_video_info(self, video_id):
+        url = f'https://www.iesdouyin.com/share/video/{video_id}/'
         try:
-            await event.send(event.plain_result(f"xjj{text}正在赶来的路上..."))
-            await self.uploader.upload_file(event, result, f"xjj{text}.{ext}", media_type)
-        except Exception as e:
-            await event.send(event.plain_result(f"获取随机视频失败: {e}"))
-    
-    @filter.command("xjj视频")
-    async def random_video(self, event: AstrMessageEvent):
-        await self.get_random_media(event, "video")
+            async with self.session.get(url, headers=self.headers) as response:
+                response_text = await response.text()
+                data = re.findall(r'_ROUTER_DATA\s*=\s*(\{.*?\});', response_text)
+                if data:
+                    json_data = json.loads(data[0])
+                    item_list = json_data['loaderData']['video_(id)/page']['videoInfoRes']['item_list'][0]
+                    nickname = item_list['author']['nickname']
+                    title = item_list['desc']
+                    timestamp = datetime.fromtimestamp(item_list['create_time']).strftime('%Y-%m-%d')
+                    video = item_list['video']['play_addr']['uri']
+                    video_url = f'https://www.douyin.com/aweme/v1/play/?video_id={video}' if 'mp3' not in video else video
+                    return {
+                        'nickname': nickname,
+                        'title': title,
+                        'timestamp': timestamp,
+                        'video_url': video_url,
+                    }
+                else:
+                    return None
+        except aiohttp.ClientError as e:
+            print(f'请求错误：{e}')
+            return None
 
-    @filter.command("xjj图片")
-    async def random_picture(self, event: AstrMessageEvent):
-        await self.get_random_media(event, "image")
+    async def parse(self, url):
+        async with self.semaphore:  # 使用类变量信号量
+            redirected_url = await self.get_redirected_url(url)
+            match = re.search(r'(\d+)', redirected_url)
+            if match:
+                video_id = match.group(1)
+                return await self.fetch_video_info(video_id)
+            else:
+                return None
 
-    @filter.command("xjj")
-    async def xjj_helper(self, event: AstrMessageEvent):
-        help_text = """xjj指令帮助：
-[1] 随机短视频: xjj视频
-[2] 随机美图: xjj图片
-[3] 获取指令帮助: xjj
-[4] 热重载config相关参数: 重载xjj配置"""
-        await event.send(event.plain_result(help_text))
-    
-    @filter.command("重载xjj配置")
-    async def reload_config(self, event: AstrMessageEvent):
-        await event.send(event.plain_result("正在重载配置参数"))
-        self.config = load_config(Path(__file__).parent / "config.yaml")
-        self.uploader = MessageAdapter(self.config)
-        await event.send(event.plain_result("已重载配置参数"))
-        
-    async def terminate(self):
-        pass
+    @staticmethod
+    def extract_video_links(input_text):
+        douyin_video_pattern = r'https?://(?:www\.|v\.)?douyin\.com/(?:video/\d+|[^\s]+)'
+        video_links = re.findall(douyin_video_pattern, input_text)
+        return video_links
+
+    async def parse_urls(self, urls):
+        tasks = [self.parse(url) for url in urls]
+        results = await asyncio.gather(*tasks)
+        return results
+
+async def main():
+    input_text = """
+    9.71 a@a.nQ 02/11 Slp:/ # 肯恰那 https://v.douyin.com/5JJ_ZvXkGz0/ 复制此链接，打开Dou音搜索，直接观看视频！
+    https://www.douyin.com/video/7488299765604666682 https://v.douyin.com/t_ToZGLYIBk
+    """
+
+    urls = DouyinParser.extract_video_links(input_text)
+
+    async with aiohttp.ClientSession() as session:
+        parser = DouyinParser(session)
+        results = await parser.parse_urls(urls)
+
+        for url, result in zip(urls, results):
+            if result:
+                print(f"URL: {url}")
+                print(f"作者：{result['nickname']}")
+                print(f"标题：{result['title']}")
+                print(f"发布时间：{result['timestamp']}")
+                print(f"视频直链：{result['video_url']}\n\n")
+            else:
+                print(f"解析失败！URL: {url}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
