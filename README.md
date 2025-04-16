@@ -1,6 +1,8 @@
-# 获取抖音视频直链
+# 抖音爬虫
+1. 解析抖音视频直链
+2. 抓取用户主页作品和喜欢
 
 ---
 
 ## 鸣谢
-- 方法来自这位大佬的博客: https://blog.csdn.net/qq_53153535/article/details/141297614
+- 解析视频链接方法来自这位大佬的博客: https://blog.csdn.net/qq_53153535/article/details/141297614
