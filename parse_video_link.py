@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 
 class DouyinParser:
-    semaphore = asyncio.Semaphore(10)  # 类变量，所有实例共享
+    semaphore = asyncio.Semaphore(10)
 
     def __init__(self, session):
         self.session = session
@@ -19,7 +19,6 @@ class DouyinParser:
             return str(response.url)
 
     def extract_router_data(self, text):
-        # 定位 window._ROUTER_DATA
         start_flag = 'window._ROUTER_DATA = '
         start_idx = text.find(start_flag)
         if start_idx == -1:
@@ -27,7 +26,6 @@ class DouyinParser:
         brace_start = text.find('{', start_idx)
         if brace_start == -1:
             return None
-        # 用栈法匹配完整 JSON
         i = brace_start
         stack = []
         while i < len(text):
@@ -49,7 +47,6 @@ class DouyinParser:
                 if not json_str:
                     print('未找到 _ROUTER_DATA')
                     return None
-                # 处理转义
                 json_str = json_str.replace('\\u002F', '/').replace('\\/', '/')
                 try:
                     json_data = json.loads(json_str)
