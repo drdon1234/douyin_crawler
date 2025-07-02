@@ -18,28 +18,64 @@ class DouyinParser:
         async with self.session.head(url, allow_redirects=True) as response:
             return str(response.url)
 
+    def extract_router_data(self, text):
+        # 定位 window._ROUTER_DATA
+        start_flag = 'window._ROUTER_DATA = '
+        start_idx = text.find(start_flag)
+        if start_idx == -1:
+            return None
+        brace_start = text.find('{', start_idx)
+        if brace_start == -1:
+            return None
+        # 用栈法匹配完整 JSON
+        i = brace_start
+        stack = []
+        while i < len(text):
+            if text[i] == '{':
+                stack.append('{')
+            elif text[i] == '}':
+                stack.pop()
+                if not stack:
+                    return text[brace_start:i+1]
+            i += 1
+        return None
+
     async def fetch_video_info(self, video_id):
         url = f'https://www.iesdouyin.com/share/video/{video_id}/'
         try:
             async with self.session.get(url, headers=self.headers) as response:
                 response_text = await response.text()
-                data = re.findall(r'_ROUTER_DATA\s*=\s*(\{.*?\});', response_text)
-                if data:
-                    json_data = json.loads(data[0])
-                    item_list = json_data['loaderData']['video_(id)/page']['videoInfoRes']['item_list'][0]
-                    nickname = item_list['author']['nickname']
-                    title = item_list['desc']
-                    timestamp = datetime.fromtimestamp(item_list['create_time']).strftime('%Y-%m-%d')
-                    video = item_list['video']['play_addr']['uri']
-                    video_url = f'https://www.douyin.com/aweme/v1/play/?video_id={video}' if 'mp3' not in video else video
-                    return {
-                        'nickname': nickname,
-                        'title': title,
-                        'timestamp': timestamp,
-                        'video_url': video_url,
-                    }
-                else:
+                json_str = self.extract_router_data(response_text)
+                if not json_str:
+                    print('未找到 _ROUTER_DATA')
                     return None
+                # 处理转义
+                json_str = json_str.replace('\\u002F', '/').replace('\\/', '/')
+                try:
+                    json_data = json.loads(json_str)
+                except Exception as e:
+                    print('JSON解析失败', e)
+                    return None
+                loader_data = json_data.get('loaderData', {})
+                video_info = None
+                for v in loader_data.values():
+                    if isinstance(v, dict) and 'videoInfoRes' in v:
+                        video_info = v['videoInfoRes']
+                        break
+                if not video_info or 'item_list' not in video_info or not video_info['item_list']:
+                    print('未找到视频信息')
+                    return None
+                item = video_info['item_list'][0]
+                nickname = item['author']['nickname']
+                title = item['desc']
+                timestamp = datetime.fromtimestamp(item['create_time']).strftime('%Y-%m-%d')
+                video_url = item['video']['play_addr']['url_list'][0]
+                return {
+                    'nickname': nickname,
+                    'title': title,
+                    'timestamp': timestamp,
+                    'video_url': video_url,
+                }
         except aiohttp.ClientError as e:
             print(f'请求错误：{e}')
             return None
@@ -68,7 +104,6 @@ class DouyinParser:
 async def main():
     input_text = """
     9.71 a@a.nQ 02/11 Slp:/ # 肯恰那 https://v.douyin.com/5JJ_ZvXkGz0/ 复制此链接，打开Dou音搜索，直接观看视频！
-    https://www.douyin.com/video/7488299765604666682 https://v.douyin.com/t_ToZGLYIBk
     """
 
     urls = DouyinParser.extract_video_links(input_text)
